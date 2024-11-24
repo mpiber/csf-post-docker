@@ -76,13 +76,23 @@ containers=`docker ps -q`
 if [ `echo ${containers} | wc -c` -gt "1" ]; then
     for container in ${containers}; do
         netmode=`docker inspect -f "{{.HostConfig.NetworkMode}}" ${container}`
-        if [ $netmode == "default" ]; then
+        if [ "$netmode" = "default" ]; then
             DOCKER_NET_INT=${DOCKER_INT}
             ipaddr=`docker inspect -f "{{.NetworkSettings.IPAddress}}" ${container}`
         else
             bridge=$(docker inspect -f "{{with index .NetworkSettings.Networks \"${netmode}\"}}{{.NetworkID}}{{end}}" ${container} | cut -c -12)
             DOCKER_NET_INT=`docker network inspect -f '{{"'br-$bridge'" | or (index .Options "com.docker.network.bridge.name")}}' $bridge`
             ipaddr=`docker inspect -f "{{with index .NetworkSettings.Networks \"${netmode}\"}}{{.IPAddress}}{{end}}" ${container}`
+        fi
+
+        # Added additional check for Swarm containers
+        if [ -z "$ipaddr" ]; then
+            ipaddr=`docker inspect -f "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}" ${container}`
+        fi
+
+        if [ -z "$ipaddr" ]; then
+            echo "Skipping container ${container} due to missing IP address"
+            continue
         fi
 
         rules=`docker port ${container} | sed 's/ //g'`
@@ -103,8 +113,13 @@ if [ `echo ${containers} | wc -c` -gt "1" ]; then
                 iptables -t nat -A POSTROUTING -s ${ipaddr}/32 -d ${ipaddr}/32 -p ${dst_proto} -m ${dst_proto} --dport ${dst_port} -j MASQUERADE
 
                 iptables_opt_src=""
-                if [ ${src_ip} != "0.0.0.0" ]; then
+                 if [ "${src_ip}" = "[" ]; then
+                    iptables_opt_src="-d 0.0.0.0/32 "
+                    src_port="${dst_port} "
+                elif [ "${src_ip}" != "0.0.0.0" ]; then
                     iptables_opt_src="-d ${src_ip}/32 "
+                else
+                    iptables_opt_src="-d ${ipaddr}/32 "
                 fi
                 iptables -t nat -A DOCKER ${iptables_opt_src}! -i ${DOCKER_NET_INT} -p ${dst_proto} -m ${dst_proto} --dport ${src_port} -j DNAT --to-destination ${ipaddr}:${dst_port}
             done
